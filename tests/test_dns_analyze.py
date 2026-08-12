@@ -839,7 +839,7 @@ class RedactionAndReportTests(unittest.TestCase):
             evidence, dns_analyze.classify_evidence(evidence), language="zh-CN"
         )
         for section in (
-            "## 结论", "## 检查项一览", "## 查到了什么", "## 问题出在哪",
+            "## 结论", "## 检查项一览", "## 解析链路图", "## 查到了什么", "## 问题出在哪",
             "## 没查到的部分", "## 分享前请注意", "## 接下来可以做什么",
         ):
             self.assertIn(section, report)
@@ -923,6 +923,210 @@ class RedactionAndReportTests(unittest.TestCase):
 
         self.assertIn("根服务器没有给出下一级委派", report)
         self.assertNotIn("每一跳都正常应答", report)
+
+
+def observation(identifier, **overrides):
+    record = {
+        "id": identifier,
+        "qname": "www.example.com",
+        "qtype": "A",
+        "status": "NOERROR",
+        "answers": ["192.0.2.80"],
+        "ttls": [120],
+        "resolver": "system",
+        "transport": "udp",
+        "role": "recursive",
+        "layer": "local",
+    }
+    record.update(overrides)
+    return record
+
+
+class PrivateAnswerTests(unittest.TestCase):
+    """An off-net resolver handing back an internal address says where the answer works."""
+
+    def _findings(self, observations, target="www.example.com"):
+        evidence = {"target": target, "observations": observations}
+        return {
+            item["category"]: item
+            for item in dns_analyze.classify_evidence(evidence)
+        }
+
+    def test_a_public_resolver_answering_with_an_rfc1918_address_is_flagged(self):
+        finding = self._findings([
+            observation("public-bad", layer="public", resolver="8.8.8.8",
+                        answers=["10.6.145.191"]),
+        ])["private_address_answer"]
+
+        self.assertEqual(finding["severity"], "low")
+        self.assertEqual(finding["status"], "high_probability")
+        self.assertIn("10.6.145.191", finding["summary"])
+        self.assertIn("8.8.8.8", finding["summary"])
+        self.assertEqual(finding["supporting_probe_ids"], ["public-bad"])
+
+    def test_the_machines_own_resolver_answering_that_way_is_not_flagged(self):
+        """Split-horizon DNS on the local network is the normal case, not a fault."""
+        categories = self._findings([
+            observation("local", answers=["10.6.145.191"]),
+        ])
+
+        self.assertNotIn("private_address_answer", categories)
+
+    def test_documentation_addresses_are_not_called_internal(self):
+        categories = self._findings([
+            observation("public-a", layer="public", resolver="8.8.8.8",
+                        answers=["192.0.2.80"]),
+        ])
+
+        self.assertNotIn("private_address_answer", categories)
+
+    def test_an_internal_target_expects_an_internal_answer(self):
+        categories = self._findings([
+            observation("public-a", qname="printer.local", layer="public",
+                        resolver="8.8.8.8", answers=["10.6.145.191"]),
+        ], target="printer.local")
+
+        self.assertNotIn("private_address_answer", categories)
+
+
+class TopologyDiagramTests(unittest.TestCase):
+    """The diagram answers one question: which hop should the reader look at."""
+
+    def _report(self, observations, target="www.example.com"):
+        evidence = {"target": target, "observations": observations}
+        return dns_analyze.render_report(
+            evidence, dns_analyze.classify_evidence(evidence), language="zh-CN"
+        )
+
+    def _diagram(self, report):
+        body = report.split("## 解析链路图", 1)[1]
+        return body.split("\n## ", 1)[0]
+
+    def _nodes(self, report):
+        """Just the fenced picture, so the legend's own glyphs are not mistaken for nodes."""
+        return self._diagram(report).split("```")[1]
+
+    def test_the_diagram_sits_between_the_layer_table_and_the_findings(self):
+        report = self._report([
+            observation("local-udp"),
+            observation("local-tcp", transport="tcp"),
+        ])
+
+        self.assertLess(report.index("## 检查项一览"), report.index("## 解析链路图"))
+        self.assertLess(report.index("## 解析链路图"), report.index("## 查到了什么"))
+
+    def test_client_recursive_and_authoritative_hops_all_appear(self):
+        report = self._report([
+            observation("local-udp", resolver_addresses=["192.0.2.53"]),
+            observation("public-a", layer="public", resolver="8.8.8.8"),
+            observation("regional-us", layer="regional", resolver="8.8.8.8", vantage="US"),
+            observation("trace", role="trace", layer="trace", status=None, answers=[],
+                        resolver="root_servers", hops=[
+                {"level": 1, "zone": ".", "nameservers": ["a.root-servers.net."], "rtt_ms": 8},
+                {"level": 2, "zone": "com", "nameservers": ["a.gtld-servers.net."], "rtt_ms": 20},
+                {"level": 3, "zone": "example.com", "nameservers": ["ns1.example.com."]},
+            ]),
+            observation("auth", role="authoritative", layer="authoritative",
+                        resolver="192.0.2.10", transport="udp"),
+        ])
+        diagram = self._diagram(report)
+
+        self.assertIn("[你的电脑]　查 www.example.com", diagram)
+        self.assertIn("本机默认解析器（192.0.2.53）", diagram)
+        self.assertIn("公共 DNS", diagram)
+        self.assertIn("8.8.8.8", diagram)
+        self.assertIn("别的地区的解析器（异地观测）", diagram)
+        self.assertIn("根服务器", diagram)
+        self.assertIn("com", diagram)
+        self.assertIn("example.com", diagram)
+        self.assertIn("192.0.2.10", diagram)
+        self.assertIn("节点含义", diagram)
+
+    def test_a_healthy_chain_marks_nothing_and_says_so(self):
+        report = self._report([
+            observation("local-udp"),
+            observation("local-tcp", transport="tcp"),
+            observation("auth", role="authoritative", layer="authoritative",
+                        resolver="192.0.2.10"),
+        ])
+        diagram = self._diagram(report)
+
+        self.assertNotIn("**要看的节点**", diagram)
+        self.assertNotIn("❌", self._nodes(report))
+        self.assertNotIn("⚠️", self._nodes(report))
+        self.assertIn("没有发现异常节点", diagram)
+
+    def test_a_public_resolver_answering_with_an_internal_address_is_the_marked_node(self):
+        diagram = self._diagram(self._report([
+            observation("local-udp"),
+            observation("public-bad", layer="public", resolver="198.51.100.9",
+                        answers=["10.6.145.191"]),
+        ]))
+
+        self.assertIn("198.51.100.9 ⚠️", diagram)
+        self.assertIn("**要看的节点**", diagram)
+        self.assertIn("- 198.51.100.9：10.6.145.191（内网地址，公网到不了）", diagram)
+        self.assertNotIn("- 本机默认解析器", diagram)
+
+    def test_a_resolver_that_never_answered_is_marked_broken(self):
+        diagram = self._diagram(self._report([
+            observation("local-udp"),
+            observation("public-dead", layer="public", resolver="198.51.100.9",
+                        status="SERVFAIL", answers=[]),
+        ]))
+
+        self.assertIn("198.51.100.9 ❌", diagram)
+        self.assertIn("**要看的节点**", diagram)
+
+    def test_differing_addresses_are_stated_in_words_not_painted_on_every_hop(self):
+        """Two resolvers disagreeing is a set-level fact; marking both hides the real ones."""
+        report = self._report([
+            observation("local-udp"),
+            observation("public-a", layer="public", resolver="8.8.8.8",
+                        answers=["198.51.100.7"]),
+        ])
+        diagram = self._diagram(report)
+
+        self.assertNotIn("❓", self._nodes(report))
+        self.assertNotIn("⚠️", self._nodes(report))
+        self.assertNotIn("**要看的节点**", diagram)
+        self.assertIn("地址不完全相同", diagram)
+        self.assertIn("不等于被篡改", diagram)
+
+    def test_matching_addresses_leave_the_divergence_note_out(self):
+        diagram = self._diagram(self._report([
+            observation("local-udp"),
+            observation("public-a", layer="public", resolver="8.8.8.8"),
+        ]))
+
+        self.assertNotIn("地址不完全相同", diagram)
+
+    def test_an_unverified_hop_is_never_counted_among_the_healthy_ones(self):
+        """A walk from the root that ends without an answer settled nothing."""
+        diagram = self._diagram(self._report([
+            observation("trace", role="trace", layer="trace", status=None, answers=[],
+                        resolver="root_servers", hops=[
+                {"level": 1, "zone": ".", "nameservers": ["a.root-servers.net."]},
+                {"level": 2, "zone": "com", "nameservers": ["a.gtld-servers.net."]},
+            ]),
+        ]))
+
+        self.assertIn("com ❓", diagram)
+        self.assertIn("没有节点被判定为有问题", diagram)
+        self.assertIn("还没能得出结论的节点：com", diagram)
+        self.assertNotIn("没有发现异常节点", diagram)
+
+    def test_a_layer_with_no_evidence_produces_no_diagram(self):
+        report = dns_analyze.render_report(
+            {"target": "www.example.com", "observations": []}, [], language="zh-CN"
+        )
+
+        self.assertNotIn("## 解析链路图", report)
+
+    def test_tree_glyphs_indent_children_under_the_right_parent(self):
+        block = dns_analyze._tree_block([["first", "child"], ["second"]])
+
+        self.assertEqual(block, ["├─ first", "│  child", "└─ second"])
 
 
 if __name__ == "__main__":

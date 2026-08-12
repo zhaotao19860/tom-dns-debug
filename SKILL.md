@@ -120,6 +120,6 @@ Remote records live under `remote_observations` with a pinned resolver and a cou
 
 ### 6. Report And Handoff
 
-Produce the Chinese report at `dns-debug-report.md`, state confirmed, high probability, or unverified, and keep advice non-mutating. Manually review all artifacts.
+Produce the Chinese report at `dns-debug-report.md`, state confirmed, high probability, or unverified, and keep advice non-mutating. Its 解析链路图 marks every hop from client to authoritative server, so a faulty one shows at a glance. Manually review all artifacts.
 
 After local privacy review, the user may choose to paste or share selected redacted content. Explain that sharing may expose names, addresses, topology, and resolver details. Never upload or send automatically.

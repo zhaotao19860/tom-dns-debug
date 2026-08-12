@@ -24,6 +24,24 @@ python3 scripts/dns_analyze.py --input /tmp/dns-check/dns-debug-report.json --ou
 
 产物是同目录下的 `dns-debug-report.md`（中文报告）和 `dns-debug-report.json`（完整原始记录）。
 
+报告里有一张解析链路图，把你的电脑 → 本机解析器 / 公共 DNS / 异地观测 → 根服务器 → 顶级域 → 权威服务器整条链路画在一起，哪个节点有问题就标在哪个节点上：
+
+```text
+[你的电脑]　查 bj.bcebos.com
+│
+├─ 本机默认解析器 ✅　113.137.57.33
+│
+├─ 公共 DNS
+│  ├─ 114.114.114.114 ✅　113.137.57.33
+│  ├─ 180.76.76.76 ⚠️　10.6.145.191（内网地址，公网到不了）
+│  └─ 8.8.8.8 ✅　103.235.47.176
+│
+└─ 权威服务器一侧（绕过缓存，从根往下问）
+   根服务器 ✅　交给 13 台服务器，8 毫秒
+      └─ com ✅　交给 13 台服务器，93 毫秒
+         └─ bcebos.com ✅　交给 ns1.baidubce.com、ns2.baidubce.com
+```
+
 作为技能使用时，把整个目录放到 `~/.claude/skills/tom-dns-debug`，用 `/tom-dns-debug <域名>` 触发；完整的执行约定见 [SKILL.md](SKILL.md)。
 
 ## 安全边界

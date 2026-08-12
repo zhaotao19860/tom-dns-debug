@@ -817,6 +817,82 @@ def _divergence_next_checks(qname: Optional[str], authoritative: List[dict]) -> 
     return ["权威服务器没有给出这一类型的记录；先确认它是否登记在别的名称上。"]
 
 
+_UNROUTABLE_NETWORKS = tuple(ipaddress.ip_network(value) for value in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+    "127.0.0.0/8", "169.254.0.0/16", "0.0.0.0/8",
+    "::1/128", "fc00::/7", "fe80::/10", "::/128",
+))
+
+
+def _is_unroutable(address) -> bool:
+    """An address only reachable inside the network that answered with it.
+
+    Deliberately narrower than ``is_private``, which also covers the documentation
+    ranges (192.0.2.0/24, 198.51.100.0/24) that stand in for public addresses in
+    examples and fixtures — calling those 内网地址 would be plainly wrong.
+    """
+    return any(
+        address in network
+        for network in _UNROUTABLE_NETWORKS
+        if network.version == address.version
+    )
+
+
+def _unroutable_answers(item: dict) -> List[str]:
+    """Answer addresses no client outside the answering network can reach."""
+    found: List[str] = []
+    ipv4, ipv6 = _addresses_by_family([item])
+    for value in ipv4 + ipv6:
+        if _is_unroutable(ipaddress.ip_address(value)) and value not in found:
+            found.append(value)
+    return found
+
+
+def _offnet_resolver(item: dict) -> bool:
+    """True when we deliberately asked a resolver outside this machine's network."""
+    resolver = item["resolver"]
+    if not resolver or resolver == "system":
+        return False
+    try:
+        address = ipaddress.ip_address(resolver)
+    except ValueError:
+        return False
+    return not _is_unroutable(address)
+
+
+def _private_answer_findings(evidence: dict, observations: List[dict]) -> List[dict]:
+    """An off-net resolver handing back an internal address is a usable clue.
+
+    Split-horizon DNS makes that answer correct inside the network that owns the
+    address, so this stays a low-severity clue about where the answer works, never
+    a verdict on the name. For an internal target it is the expected answer and no
+    finding is raised at all.
+    """
+    if _internal_names(evidence, observations):
+        return []
+    support = [
+        item for item in observations
+        if _offnet_resolver(item) and _unroutable_answers(item)
+    ]
+    if not support:
+        return []
+    addresses: List[str] = []
+    for item in support:
+        for value in _unroutable_answers(item):
+            if value not in addresses:
+                addresses.append(value)
+    resolvers = _sorted_known({item["resolver"] for item in support})
+    return [_finding(
+        "private_address_answer", "low", "medium", "high_probability",
+        "外部解析器（{0}）给出的是内网地址（{1}）——公网上到不了这个地址，"
+        "除非这台机器就在那个内网里，否则照着它连接会失败。".format(
+            "、".join(resolvers), "、".join(addresses),
+        ),
+        support, [],
+        ["换另一家公共 DNS 或直接问权威服务器，核对同一个名字的公网地址。"],
+    )]
+
+
 def _public_resolver_findings(observations: List[dict]) -> List[dict]:
     """Compare what different resolvers hand back for the same question."""
     authoritative = [
@@ -1184,6 +1260,8 @@ def classify_evidence(evidence: dict) -> List[dict]:
             ["比较启用/禁用 EDNS 的 UDP 查询，并确认 TCP 回退是否成功。"],
         ))
 
+    findings.extend(_private_answer_findings(evidence, observations))
+
     regional_requested = _regional_analysis_requested(evidence, observations)
     regional_semantics = _regional_semantics(observations)
     regional_support = regional_semantics["divergent_support"]
@@ -1411,6 +1489,7 @@ _SEVERITY_ORDER = (
     "resolver_authoritative_divergence",
     "authoritative_server_refused",
     "regional_answer_divergence",
+    "private_address_answer",
     "transport_answer_divergence",
     "truncation_or_edns_issue",
     "resolver_failure",
@@ -1725,6 +1804,270 @@ def _comparison_table(observations: List[dict], title: str) -> List[str]:
     for label in sorted(rows):
         lines.append("| {0} | {1} |".format(label, _answer_digest(rows[label])))
     return lines + [""]
+
+
+def _node_findings(node_observations: List[dict], findings: List[dict]) -> List[dict]:
+    ids = {item["id"] for item in node_observations}
+    return [
+        item for item in findings
+        if ids & set(item.get("supporting_probe_ids") or ())
+    ]
+
+
+def _node_icon(node_observations: List[dict], findings: List[dict]) -> str:
+    """Worst thing the evidence says about one hop, as a single glyph.
+
+    Only what is true of this hop alone. A comparison finding describes a set of
+    resolvers, not any one of them, so painting every participant ❓ would light up
+    the whole picture for what is usually ordinary CDN variation. NXDOMAIN and
+    NODATA are faithful answers: the name's problem is the report's to explain, not
+    this hop's fault.
+    """
+    if not node_observations:
+        return "⚪"
+    if any(_execution_note(item) for item in node_observations):
+        return "❌"
+    statuses = {item["status"] for item in node_observations}
+    if statuses & {"SERVFAIL", "REFUSED", "FORMERR"}:
+        return "❌"
+    if any(_unroutable_answers(item) for item in node_observations if _offnet_resolver(item)):
+        return "⚠️"
+    deciding = [
+        item for item in _node_findings(node_observations, findings)
+        if item.get("category") not in _NON_CAUSE_CATEGORIES
+        and item.get("severity") != "low"
+    ]
+    if any(item.get("status") == "confirmed" for item in deciding):
+        return "❌"
+    if any(item.get("status") == "high_probability" for item in deciding):
+        return "⚠️"
+    if statuses & {"NOERROR", "NXDOMAIN", "NODATA"}:
+        return "✅"
+    return "❓"
+
+
+def _address_digest(node_observations: List[dict]) -> str:
+    """What this hop handed back, address records first."""
+    addressed = [item for item in node_observations if item["_qtype"] in {"A", "AAAA"}]
+    digest = _answer_digest(addressed or node_observations)
+    unroutable = []
+    for item in node_observations:
+        for value in _unroutable_answers(item):
+            if value in digest and value not in unroutable:
+                unroutable.append(value)
+    if unroutable:
+        digest += "（内网地址，公网到不了）"
+    return digest
+
+
+def _node_line(
+    label: str,
+    node_observations: List[dict],
+    findings: List[dict],
+    marks: Dict[str, List[str]],
+) -> str:
+    icon = _node_icon(node_observations, findings)
+    detail = _address_digest(node_observations) if node_observations else "本次没有检查"
+    if icon in marks:
+        marks[icon].append("{0}：{1}".format(label, detail))
+    return "{0} {1}　{2}".format(label, icon, detail)
+
+
+def _hop_chain(observations: List[dict]) -> List[dict]:
+    """The longest recorded root-downward walk; several types trace the same path."""
+    best: List[dict] = []
+    for item in observations:
+        if _observation_layer(item) != "trace":
+            continue
+        hops = [hop for hop in item.get("hops") or () if isinstance(hop, dict)]
+        if len(hops) > len(best):
+            best = hops
+    return best
+
+
+def _hop_text(hop: dict, icon: str = "✅") -> str:
+    zone = str(hop.get("zone") or "")
+    label = "根服务器" if zone == "." else _safe_text(zone)
+    nameservers = [
+        _safe_text(value).rstrip(".") for value in hop.get("nameservers") or ()
+    ]
+    parts = []
+    if len(nameservers) > 3:
+        parts.append("交给 {0} 台服务器".format(len(nameservers)))
+    elif nameservers:
+        parts.append("交给 {0}".format("、".join(nameservers)))
+    rtt = hop.get("rtt_ms")
+    if isinstance(rtt, (int, float)):
+        parts.append("{0} 毫秒".format(int(rtt)))
+    return "{0} {1}　{2}".format(label, icon, "，".join(parts) or "有应答")
+
+
+def _tree_block(branches: List[List[str]], spaced: bool = False) -> List[str]:
+    """Join rendered branch blocks under one parent with box-drawing glyphs."""
+    lines: List[str] = []
+    blocks = [block for block in branches if block]
+    for index, block in enumerate(blocks):
+        last = index == len(blocks) - 1
+        lines.append("{0}─ {1}".format("└" if last else "├", block[0]))
+        for line in block[1:]:
+            lines.append(("   " if last else "│  ") + line)
+        if spaced and not last:
+            lines.append("│")
+    return lines
+
+
+def _authority_branch(
+    observations: List[dict],
+    findings: List[dict],
+    marks: Dict[str, List[str]],
+) -> List[str]:
+    """Root → TLD → zone → the servers that answer for it."""
+    hops = _hop_chain(observations)
+    servers: Dict[str, List[dict]] = {}
+    for item in observations:
+        if (_observation_layer(item) == "authoritative"
+                and item["role"] in {"authoritative", "child_authority"}
+                and item["resolver"]):
+            servers.setdefault(item["resolver"], []).append(item)
+    if not hops and not servers:
+        return []
+    block = ["权威服务器一侧（绕过缓存，从根往下问）"]
+    walk = [hop for hop in hops if hop.get("zone")]
+    # A trace that stops early is the delegation problem; the glyph belongs on the last
+    # zone it reached, not on every hop that answered before it.
+    trace_icon = _node_icon(
+        [item for item in observations if _observation_layer(item) == "trace"], findings,
+    )
+    for depth, hop in enumerate(walk):
+        last_hop = depth == len(walk) - 1
+        icon = trace_icon if last_hop and trace_icon != "✅" else "✅"
+        text = _hop_text(hop, icon)
+        if last_hop and icon in marks:
+            marks[icon].append(text.split(" ")[0])
+        block.append("   " * depth + ("└─ " if depth else "") + text)
+    leaves = [
+        [_node_line(_resolver_text(resolver), servers[resolver], findings, marks)]
+        for resolver in sorted(servers)
+    ]
+    if leaves:
+        indent = "   " * len(walk)
+        block.extend(indent + line for line in _tree_block(leaves))
+    return block
+
+
+def _recursive_answer_note(node_groups: List[List[dict]]) -> str:
+    """Say it in words when the recursive hops did not all hand back the same addresses.
+
+    The glyphs stay clean because differing addresses are not a per-hop fault; this
+    line keeps the fact visible instead of hiding it behind a row of ❓.
+    """
+    seen = []
+    for group in node_groups:
+        addressed = [item for item in group if item["_qtype"] in {"A", "AAAA"}]
+        ipv4, ipv6 = _addresses_by_family(addressed)
+        digest = frozenset(ipv4 + ipv6)
+        if digest and digest not in seen:
+            seen.append(digest)
+    if len(seen) < 2:
+        return ""
+    return (
+        "上面几个解析器给出的地址不完全相同。大站点按地区分配入口时本来就会这样，"
+        "不等于被篡改；具体差异见下面的对比表。"
+    )
+
+
+def _topology_section(
+    evidence: dict,
+    observations: List[dict],
+    findings: List[dict],
+    target_text: str,
+) -> List[str]:
+    """One picture of every hop a request passes through, worst hops marked."""
+    marks: Dict[str, List[str]] = {"❌": [], "⚠️": [], "❓": []}
+    local: List[dict] = []
+    public: Dict[str, List[dict]] = {}
+    regional: Dict[str, List[dict]] = {}
+    for item in observations:
+        layer = _observation_layer(item)
+        if item.get("vantage"):
+            regional.setdefault(item["vantage"], []).append(item)
+        elif layer in {"local", "dnssec"} and item["resolver"] in {None, "system"}:
+            local.append(item)
+        elif layer in {"public", "dnssec"} and item["resolver"]:
+            public.setdefault(item["resolver"], []).append(item)
+
+    branches: List[List[str]] = []
+    if local:
+        addresses = []
+        for item in local:
+            for value in item.get("resolver_addresses") or ():
+                text = _safe_text(value)
+                if text not in addresses:
+                    addresses.append(text)
+        label = "本机默认解析器"
+        if addresses:
+            label += "（{0}）".format(
+                addresses[0] if len(addresses) == 1
+                else "{0} 等 {1} 个".format(addresses[0], len(addresses))
+            )
+        branches.append([_node_line(label, local, findings, marks)])
+    if public:
+        branches.append(["公共 DNS"] + _tree_block([
+            [_node_line(_resolver_text(resolver), public[resolver], findings, marks)]
+            for resolver in sorted(public)
+        ]))
+    if regional:
+        branches.append(["别的地区的解析器（异地观测）"] + _tree_block([
+            [_node_line(_vantage_text(label), regional[label], findings, marks)]
+            for label in sorted(regional)
+        ]))
+    authority = _authority_branch(observations, findings, marks)
+    if authority:
+        branches.append(authority)
+    if not branches:
+        return []
+
+    lines = [
+        "## 解析链路图",
+        "",
+        "```text",
+        "[你的电脑]　查 {0}".format(target_text),
+        "│",
+    ]
+    lines.extend(_tree_block(branches, spaced=True))
+    lines.extend([
+        "```",
+        "",
+        "> 节点含义：✅ 正常　❌ 已确认有问题　⚠️ 可能有问题　❓ 待验证　⚪ 未检查",
+        "",
+    ])
+    flagged = marks["❌"] + marks["⚠️"]
+    if flagged:
+        lines.append("**要看的节点**")
+        lines.append("")
+        lines.extend("- {0}".format(text) for text in flagged)
+        lines.append("")
+    elif marks["❓"]:
+        lines.append("没有节点被判定为有问题。")
+        lines.append("")
+    else:
+        lines.append("从这台机器到权威服务器，每一跳都正常应答，没有发现异常节点。")
+        lines.append("")
+    if marks["❓"]:
+        # A row that never reached a verdict must not be read as one of the healthy ones.
+        lines.append("还没能得出结论的节点：{0}。".format("、".join(
+            text.split("：")[0] for text in marks["❓"]
+        )))
+        lines.append("")
+    note = _recursive_answer_note(
+        ([local] if local else [])
+        + [public[key] for key in sorted(public)]
+        + [regional[key] for key in sorted(regional)]
+    )
+    if note:
+        lines.append(note)
+        lines.append("")
+    return lines
 
 
 def _observed_section(
@@ -2202,6 +2545,7 @@ def render_report(evidence: dict, findings: List[dict], language: str = "zh-CN")
         "> 结果列含义：✅ 已确认　❌ 已确认有问题　⚠️ 高概率　❓ 待验证　⚪ 不适用",
         "",
     ])
+    lines.extend(_topology_section(evidence, observations, findings, target_text))
     lines.extend(_observed_section(evidence, observations, findings, target_text))
     lines.extend(_cause_section(findings))
     lines.extend(_gap_section(evidence, observations, findings, matrix, vantages))

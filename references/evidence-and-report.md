@@ -95,6 +95,7 @@ Call `classify_evidence`, then `render_report(..., language="zh-CN")`. Any other
 
 ## 结论
 ## 检查项一览
+## 解析链路图
 ## 查到了什么
 ## 问题出在哪
 ## 没查到的部分
@@ -105,5 +106,19 @@ Call `classify_evidence`, then `render_report(..., language="zh-CN")`. Any other
 `问题出在哪` is rendered only when a non-normal finding exists; successful resolution and missing evidence are never causes. Every other section is always present.
 
 The report is written for a reader who does not know the protocol: no `key=value` strings, no nested brackets, no probe IDs, no raw JSON. Addresses go in lists, paired facts in tables. `检查项一览` carries one row per layer with an icon whose meaning is stated below the table: ✅ confirmed, ❌ confirmed problem, ⚠️ high probability, ❓ unverified, ⚪ not applicable. The headline in `结论` must agree with the rows actually rendered. Findings cite how many queries observed the behaviour, not which ones. `分享前请注意` names the internal addresses and names that actually appear in this report, not a generic caution, and states whether anything was sent to a remote service. The report ends by pointing at `dns-debug-report.json` for the raw records.
+
+`解析链路图` draws every hop a request passes through in one fenced block: the client, then the recursive side (this machine's default resolver, each public resolver, each remote vantage), then the authoritative side as a root → TLD → zone ladder ending at the servers that answer for the zone. It is rendered whenever any hop has evidence, and omitted only when there is none.
+
+Each node carries the same five icons, and they describe that node alone:
+
+| Node icon | Earned by |
+|---|---|
+| ❌ | no answer at all, or `SERVFAIL`/`REFUSED`/`FORMERR`, or a confirmed cause finding supported by this node |
+| ⚠️ | an off-net resolver answering with an address only its own network can reach, or a high-probability cause finding |
+| ✅ | it answered, including a faithful `NXDOMAIN` or NODATA |
+| ❓ | it reached no verdict, such as a walk from the root that ended without an answer |
+| ⚪ | not checked this run |
+
+A comparison spanning several resolvers is a fact about the set, never a mark on any one of them: differing addresses are stated in a sentence under the diagram instead. Flagged nodes are repeated under `要看的节点` with what each returned, ❓ nodes are listed separately so they are not read as healthy, and an all-✅ chain says so in one line.
 
 Finalize with `--finalize-bundle`, then manually review every artifact for internal names, addresses, topology, free-form output, and secrets. Sharing can expose those details. The skill never uploads or sends automatically, and the one remote step sends only the queried name and record type.
