@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -214,15 +215,33 @@ class PlanTests(unittest.TestCase):
         for entry in plan:
             counted[entry["layer"]] = counted.get(entry["layer"], 0) + 1
         # 16 local queries (4 types x 2 samples x UDP/TCP), 4 signature queries here plus
-        # one pair at a validating resolver, 2 queries at each of 3 public resolvers, and
-        # a single delegation walk. The authoritative layer needs nameserver addresses
+        # one pair at a validating resolver, 4 queries at each of 3 public resolvers, and
+        # one delegation walk per requested type. The authoritative layer needs nameserver addresses
         # that only the local layer can supply, so it is planned during collection.
-        self.assertEqual(counted, {"local": 16, "dnssec": 6, "public": 6, "trace": 1})
+        self.assertEqual(counted, {"local": 16, "dnssec": 6, "public": 12, "trace": 4})
         self.assertEqual(len({entry["id"] for entry in plan}), len(plan))
         self.assertEqual({entry["role"] for entry in plan if entry["layer"] == "trace"}, {"trace"})
         self.assertEqual(
             {entry["resolver"] for entry in plan if entry["layer"] == "public"},
             set(dns_probe._PUBLIC_RESOLVERS),
+        )
+        for entry in plan:
+            dns_probe._validate_probe_argv(entry["argv"])
+
+    def test_extra_layers_follow_the_requested_record_type(self):
+        plan = dns_probe.build_probe_plan(
+            dns_probe.normalize_target("www.example.com"),
+            {"dig": True},
+            options={
+                "record_types": ["SOA"],
+                "layers": ["public", "trace"],
+                "public_resolvers": ["8.8.8.8"],
+            },
+        )
+
+        self.assertEqual(
+            {(entry["layer"], entry["qtype"]) for entry in plan},
+            {("local", "SOA"), ("public", "SOA"), ("trace", "SOA")},
         )
         for entry in plan:
             dns_probe._validate_probe_argv(entry["argv"])
@@ -841,6 +860,20 @@ class AuthoritativeLayerTests(unittest.TestCase):
         self.assertEqual(outcome["skipped"][0]["layer"], "authoritative")
         self.assertIn("no nameserver names were observed", outcome["skipped"][0]["reason"])
 
+    def test_authoritative_queries_follow_the_requested_record_type(self):
+        entries = dns_probe._authoritative_layer_entries(
+            "www.example.com",
+            [{"name": "ns1.example.com", "address": "192.0.2.10"}],
+            "example.com",
+            ["SOA"],
+        )
+
+        self.assertEqual(
+            [entry["qtype"] for entry in entries],
+            ["SOA", "NS"],
+        )
+        self.assertIn(" SOA ", " " + " ".join(entries[0]["argv"]) + " ")
+
 
 class ConcurrencyTests(unittest.TestCase):
     def _entries(self, count):
@@ -1010,6 +1043,75 @@ class RemoteObservationTests(unittest.TestCase):
         self.assertIsNone(result["disclosure"]["endpoint"])
         # A stable code so the report states the real reason without parsing prose.
         self.assertEqual(result["disclosure"]["reason_code"], "internal_name")
+
+    def test_special_use_names_and_non_global_addresses_are_refused_remotely(self):
+        for target in (
+            {"hostname": "foo.home", "ip": None},
+            {"hostname": "foo.intranet", "ip": None},
+            {"hostname": "foo.test", "ip": None},
+            {"hostname": "foo.invalid", "ip": None},
+            {"hostname": "foo.localhost", "ip": None},
+            {"hostname": "foo.private", "ip": None},
+            {"hostname": None, "ip": "100.64.0.1"},
+            {"hostname": None, "ip": "192.0.2.1"},
+        ):
+            with self.subTest(target=target):
+                requester = _RecordingRequester()
+                result = dns_probe.fetch_remote_observations(
+                    target, "A", ["US"], True, requester=requester,
+                )
+                self.assertEqual(requester.calls, [])
+                self.assertFalse(result["disclosure"]["sent"])
+                expected_code = "internal_name" if target["hostname"] else "unsuitable_target"
+                self.assertEqual(result["disclosure"]["reason_code"], expected_code)
+
+    def test_remote_observation_rejects_public_ip_literals(self):
+        requester = _RecordingRequester()
+        result = dns_probe.fetch_remote_observations(
+            {"hostname": None, "ip": "8.8.8.8"},
+            "A", ["US"], True, requester=requester,
+        )
+
+        self.assertEqual(requester.calls, [])
+        self.assertFalse(result["disclosure"]["sent"])
+        self.assertEqual(result["disclosure"]["reason_code"], "unsuitable_target")
+
+    def test_multiple_resolver_dnssec_assessment_uses_prefixed_probe_ids(self):
+        assessment = {
+            "validation": "secure",
+            "supporting_probe_ids": ["dig_dnssec_a", "dig_dnssec_cd_a"],
+        }
+        calls = []
+
+        def fake_collect(target, options):
+            calls.append(options.get("resolver"))
+            return {
+                "probes": [
+                    {"id": "dig_dnssec_a", "layer": "dnssec"},
+                    {"id": "dig_dnssec_cd_a", "layer": "dnssec"},
+                ],
+                "skipped": [],
+                "dnssec": dict(assessment),
+            }
+
+        with mock.patch.object(dns_probe, "collect_evidence", side_effect=fake_collect):
+            combined = dns_probe._collect_cli_evidence(
+                "www.example.com", ["1.1.1.1", "8.8.8.8"], ["A"], 1,
+                "record", None, 1.0, True, False,
+            )
+
+        self.assertEqual(calls, ["1.1.1.1", "8.8.8.8"])
+        self.assertEqual(
+            combined["dnssec"]["supporting_probe_ids"],
+            ["resolver-1-dig_dnssec_a", "resolver-1-dig_dnssec_cd_a"],
+        )
+        self.assertEqual(
+            [probe["id"] for probe in combined["probes"]],
+            [
+                "resolver-1-dig_dnssec_a", "resolver-1-dig_dnssec_cd_a",
+                "resolver-2-dig_dnssec_a", "resolver-2-dig_dnssec_cd_a",
+            ],
+        )
 
     def test_successful_measurement_polls_until_finished(self):
         document = json.loads(

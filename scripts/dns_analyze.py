@@ -826,21 +826,32 @@ def _public_resolver_findings(observations: List[dict]) -> List[dict]:
     ]
     usable = [
         item for item in observations
-        if item["role"] == "recursive" and item["status"] == "NOERROR"
-        and item["_answers"] and _has_known_query_identity(item)
-        and _delivered_query_type(item)
+        if item["role"] == "recursive" and item["status"]
+        and _has_known_query_identity(item)
     ]
     findings = []
-    by_query: Dict[Tuple[Optional[str], Optional[str]], Dict[str, List[dict]]] = {}
+    # UDP and TCP are separate cohorts: a transport mismatch is evidence about the
+    # path, not evidence that two resolver implementations disagree.
+    by_query: Dict[
+        Tuple[Optional[str], Optional[str], Optional[str]], Dict[str, List[dict]]
+    ] = {}
     for item in usable:
-        by_query.setdefault(_query_identity(item), {}).setdefault(
+        identity = (*_query_identity(item), item["transport"])
+        by_query.setdefault(identity, {}).setdefault(
             item["resolver"] or "unknown", []
         ).append(item)
     for identity, by_resolver in sorted(by_query.items(), key=lambda pair: str(pair[0])):
         if len(by_resolver) < 2:
             continue
         supporting = [item for group in by_resolver.values() for item in group]
-        answer_sets = {tuple(group[0]["_answers"]) for group in by_resolver.values()}
+        resolver_signatures = {
+            resolver: {
+                (item["status"], item["_answers"])
+                for item in group
+            }
+            for resolver, group in by_resolver.items()
+        }
+        answer_sets = set(frozenset(signatures) for signatures in resolver_signatures.values())
         resolvers = "、".join(sorted(by_resolver))
         if len(answer_sets) == 1:
             findings.append(_finding(

@@ -72,6 +72,10 @@ _REMOTE_TOTAL_BUDGET_S = 45.0
 _REMOTE_MAX_RESPONSE_BYTES = 1000000
 _REMOTE_RECORD_TYPES = ("A", "AAAA", "NS", "SOA", "DS", "DNSKEY")
 _REGION_CODE = re.compile(r"^[A-Za-z]{2}$")
+_SPECIAL_USE_SUFFIXES = (
+    ".local", ".internal", ".lan", ".corp", ".home", ".intranet",
+    ".test", ".invalid", ".localhost", ".private", ".example",
+)
 # Two-label public suffixes that appear in the targets this skill is used on.
 # A miss only means the apex guess is one label off, which is reported, never hidden.
 _TWO_LABEL_SUFFIXES = frozenset({
@@ -377,10 +381,13 @@ def _dnssec_layer_entries(
     return entries
 
 
-def _public_layer_entries(name: str, addresses: List[str]) -> List[dict]:
+def _public_layer_entries(
+    name: str, addresses: List[str], record_types: Optional[List[str]] = None
+) -> List[dict]:
+    record_types = list(record_types or ("A", "AAAA"))
     entries = []
     for address in addresses:
-        for qtype in ("A", "AAAA"):
+        for qtype in record_types:
             entries.append(_entry(
                 "dig_public_{0}_{1}".format(_resolver_slug(address), qtype.lower()),
                 "Ask public resolver {0} for {1} records".format(address, qtype),
@@ -390,28 +397,39 @@ def _public_layer_entries(name: str, addresses: List[str]) -> List[dict]:
     return entries
 
 
-def _trace_layer_entries(name: str) -> List[dict]:
-    return [_entry(
-        "dig_trace", "Follow the delegation from the root servers down",
-        ["dig", "+trace", "+time=2", "+tries=2", "A", name],
-        "udp", "root_servers", "A", 1, "trace", "trace", None, _TRACE_TIMEOUT_S,
-    )]
+def _trace_layer_entries(name: str, record_types: Optional[List[str]] = None) -> List[dict]:
+    entries = []
+    for qtype in list(record_types or ("A",)):
+        suffix = "" if qtype == "A" else "_" + qtype.lower()
+        entries.append(_entry(
+            "dig_trace" + suffix, "Follow the delegation from the root servers down",
+            ["dig", "+trace", "+time=2", "+tries=2", qtype, name],
+            "udp", "root_servers", qtype, 1, "trace", "trace", None, _TRACE_TIMEOUT_S,
+        ))
+    return entries
 
 
-def _authoritative_layer_entries(name: str, servers: List[dict], zone: Optional[str] = None) -> List[dict]:
+def _authoritative_layer_entries(
+    name: str,
+    servers: List[dict],
+    zone: Optional[str] = None,
+    record_types: Optional[List[str]] = None,
+) -> List[dict]:
     """Direct non-recursive queries against already-observed authoritative addresses."""
+    record_types = list(record_types or ("A",))
     entries = []
     for server in servers[:_MAX_AUTHORITATIVE_SERVERS]:
         address = server["address"]
         slug = _resolver_slug(address)
-        entries.append(_entry(
-            "dig_authoritative_{0}_a".format(slug),
-            "Ask authoritative server {0} directly for A records".format(
-                server.get("name") or address
-            ),
-            ["dig", "+norecurse", "+time=2", "+tries=2", "A", name, "@" + address],
-            "udp", address, "A", 1, "authoritative", "authoritative",
-        ))
+        for qtype in record_types:
+            entries.append(_entry(
+                "dig_authoritative_{0}_{1}".format(slug, qtype.lower()),
+                "Ask authoritative server {0} directly for {1} records".format(
+                    server.get("name") or address, qtype,
+                ),
+                ["dig", "+norecurse", "+time=2", "+tries=2", qtype, name, "@" + address],
+                "udp", address, qtype, 1, "authoritative", "authoritative",
+            ))
     if entries and zone:
         address = servers[0]["address"]
         entries.append(_entry(
@@ -540,9 +558,9 @@ def build_probe_plan(target: dict, capabilities: dict, options: Optional[dict] =
                 public_addresses[0] if public_addresses else None,
             ))
         if "public" in layers:
-            plan.extend(_public_layer_entries(name, public_addresses))
+            plan.extend(_public_layer_entries(name, public_addresses, record_types))
         if "trace" in layers:
-            plan.extend(_trace_layer_entries(name))
+            plan.extend(_trace_layer_entries(name, record_types))
     return plan
 
 
@@ -1339,9 +1357,12 @@ def _collect_platform_preflight() -> tuple[dict, List[dict]]:
 def _is_internal_name(target: dict) -> bool:
     if target["ip"]:
         address = ipaddress.ip_address(target["ip"])
-        return address.is_private or address.is_loopback or address.is_link_local
+        # Remote observation is limited to globally routable unicast addresses. The
+        # standard-library flags cover private, documentation, loopback, link-local,
+        # shared, multicast, reserved, and unspecified ranges together.
+        return not address.is_global or address.is_multicast
     hostname = target["hostname"]
-    return "." not in hostname or hostname.endswith((".local", ".internal", ".lan", ".corp"))
+    return "." not in hostname or hostname.endswith(_SPECIAL_USE_SUFFIXES)
 
 
 def _tool_versions(capabilities: dict, runner: Callable, deadline: float, max_output_bytes: int) -> dict:
@@ -1543,6 +1564,7 @@ def _authoritative_layer(
     runner: Callable,
     semaphores: Dict[str, Any],
     semaphore_lock: Any,
+    record_types: Optional[List[str]] = None,
 ) -> dict:
     """Resolve nameserver addresses when needed, then plan direct authoritative queries."""
     discovery = _observed_nameservers(probes, default_qname)
@@ -1610,7 +1632,9 @@ def _authoritative_layer(
         })
     return {
         "probes": resolved_probes,
-        "plan": _authoritative_layer_entries(default_qname, ordered, discovery["zone"]),
+        "plan": _authoritative_layer_entries(
+            default_qname, ordered, discovery["zone"], record_types,
+        ),
         "skipped": skipped,
     }
 
@@ -1892,6 +1916,12 @@ def fetch_remote_observations(
             "remote observation requires --acknowledge-remote-query",
             code="not_acknowledged",
         )
+    if target.get("ip"):
+        return _remote_refusal(
+            regions, name,
+            "remote observation accepts public hostnames only, not IP literals",
+            code="unsuitable_target",
+        )
     if _is_internal_name(target):
         # Irreversible once sent: an internal name in a third party's logs cannot be
         # recalled, so the acknowledgement does not unlock this case.
@@ -2052,6 +2082,7 @@ def collect_evidence(
         authoritative = _authoritative_layer(
             default_qname, probes, resolver, preflight, timeout_s, deadlines,
             deadline, max_output_bytes, runner, semaphores, semaphore_lock,
+            record_types,
         )
         probes.extend(authoritative["probes"])
         skipped.extend(authoritative["skipped"])
@@ -2396,6 +2427,12 @@ def _prefixed_entries(entries: List[dict], prefix: str) -> List[dict]:
     return prefixed
 
 
+def _prefixed_ids(values: Any, prefix: str) -> Any:
+    if not isinstance(values, list):
+        return values
+    return [prefix + str(value) for value in values]
+
+
 def _collect_cli_evidence(
     target: str,
     resolvers: List[str],
@@ -2442,6 +2479,14 @@ def _collect_cli_evidence(
         prefix = "resolver-{0}-".format(index) if multiple else ""
         evidence["probes"] = _prefixed_entries(evidence["probes"], prefix)
         evidence["skipped"] = _prefixed_entries(evidence["skipped"], prefix)
+        if isinstance(evidence.get("dnssec"), dict):
+            evidence["dnssec"] = dict(evidence["dnssec"])
+            evidence["dnssec"]["supporting_probe_ids"] = _prefixed_ids(
+                evidence["dnssec"].get("supporting_probe_ids"), prefix,
+            )
+            evidence["dnssec"]["contradictory_probe_ids"] = _prefixed_ids(
+                evidence["dnssec"].get("contradictory_probe_ids"), prefix,
+            )
         if combined is None:
             combined = evidence
         else:

@@ -630,6 +630,64 @@ class PublicResolverComparisonTests(unittest.TestCase):
             ["直接询问权威服务器，看每台解析器的答案是否都在权威给出的地址集合内。"],
         )
 
+    def test_resolver_rcode_differences_and_empty_answers_are_reported(self):
+        evidence = {
+            "target": "www.example.com",
+            "observations": [
+                {
+                    "id": "nx-1", "qname": "www.example.com", "qtype": "A",
+                    "resolver": "8.8.8.8", "transport": "udp", "role": "recursive",
+                    "status": "NXDOMAIN", "answers": [],
+                },
+                {
+                    "id": "nx-2", "qname": "www.example.com", "qtype": "A",
+                    "resolver": "8.8.8.8", "transport": "udp", "role": "recursive",
+                    "status": "NXDOMAIN", "answers": [],
+                },
+                {
+                    "id": "ok-1", "qname": "www.example.com", "qtype": "A",
+                    "resolver": "1.1.1.1", "transport": "udp", "role": "recursive",
+                    "status": "NOERROR", "answers": [],
+                },
+                {
+                    "id": "ok-2", "qname": "www.example.com", "qtype": "A",
+                    "resolver": "1.1.1.1", "transport": "udp", "role": "recursive",
+                    "status": "NOERROR", "answers": [],
+                },
+            ],
+        }
+
+        finding = next(
+            item for item in dns_analyze.classify_evidence(evidence)
+            if item["category"] == "public_resolver_divergence"
+        )
+        self.assertEqual(finding["status"], "unverified")
+        self.assertEqual(
+            finding["supporting_probe_ids"], ["nx-1", "nx-2", "ok-1", "ok-2"]
+        )
+
+    def test_udp_tcp_differences_are_not_called_resolver_divergence(self):
+        evidence = {
+            "target": "www.example.com",
+            "observations": [
+                {
+                    "id": "udp", "qname": "www.example.com", "qtype": "A",
+                    "resolver": "8.8.8.8", "transport": "udp", "role": "recursive",
+                    "status": "NOERROR", "answers": ["192.0.2.1"],
+                },
+                {
+                    "id": "tcp", "qname": "www.example.com", "qtype": "A",
+                    "resolver": "1.1.1.1", "transport": "tcp", "role": "recursive",
+                    "status": "SERVFAIL", "answers": [],
+                },
+            ],
+        }
+
+        categories = {
+            finding["category"] for finding in dns_analyze.classify_evidence(evidence)
+        }
+        self.assertNotIn("public_resolver_divergence", categories)
+
     def test_next_check_does_not_repeat_an_authoritative_query_already_run(self):
         evidence = self._resolver_answers(**{
             "8.8.8.8": ["192.0.2.10"], "1.1.1.1": ["198.51.100.20"],
