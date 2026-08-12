@@ -1,0 +1,28 @@
+{
+  "target": "broken-dnssec.example",
+  "observations": [
+    {
+      "id": "dnssec-validating",
+      "vantage": "cn-north",
+      "resolver": "validating-public",
+      "transport": "udp",
+      "status": "SERVFAIL",
+      "answers": [],
+      "dnssec": {
+        "validation": "bogus",
+        "error": "signature expired"
+      }
+    },
+    {
+      "id": "dnssec-cd",
+      "vantage": "cn-north",
+      "resolver": "validating-public",
+      "transport": "udp",
+      "status": "NOERROR",
+      "answers": ["192.0.2.60"],
+      "dnssec": {
+        "checking_disabled": true
+      }
+    }
+  ]
+}

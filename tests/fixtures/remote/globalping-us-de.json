@@ -1,0 +1,53 @@
+{
+  "id": "measurement-fixture",
+  "type": "dns",
+  "status": "finished",
+  "target": "www.example.com",
+  "measurementOptions": {
+    "query": {"type": "A"},
+    "resolver": "8.8.8.8",
+    "protocol": "UDP"
+  },
+  "results": [
+    {
+      "probe": {"country": "US", "city": "Ashburn", "network": "Example Networks"},
+      "result": {
+        "statusCodeName": "NOERROR",
+        "answers": [
+          {"name": "www.example.com.", "type": "A", "ttl": 300, "class": "IN", "value": "192.0.2.10"}
+        ]
+      }
+    },
+    {
+      "probe": {"country": "US", "city": "Dallas", "network": "Example Networks"},
+      "result": {
+        "statusCodeName": "NOERROR",
+        "answers": [
+          {"name": "www.example.com.", "type": "A", "ttl": 280, "class": "IN", "value": "192.0.2.10"}
+        ]
+      }
+    },
+    {
+      "probe": {"country": "DE", "city": "Frankfurt", "network": "Example GmbH"},
+      "result": {
+        "statusCodeName": "NOERROR",
+        "answers": [
+          {"name": "www.example.com.", "type": "A", "ttl": 300, "class": "IN", "value": "198.51.100.10"}
+        ]
+      }
+    },
+    {
+      "probe": {"country": "DE", "city": "Berlin", "network": "Example GmbH"},
+      "result": {
+        "statusCodeName": "NOERROR",
+        "answers": [
+          {"name": "www.example.com.", "type": "A", "ttl": 290, "class": "IN", "value": "198.51.100.10"}
+        ]
+      }
+    },
+    {
+      "probe": {"country": "DE", "city": "Hamburg", "network": "Example GmbH"},
+      "result": {}
+    }
+  ]
+}

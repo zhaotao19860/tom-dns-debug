@@ -1,0 +1,14 @@
+{
+  "target": "absent.example",
+  "observations": [
+    {
+      "id": "recursive-nxdomain",
+      "vantage": "cn-north",
+      "resolver": "public",
+      "transport": "udp",
+      "record_type": "A",
+      "status": "NXDOMAIN",
+      "answers": []
+    }
+  ]
+}

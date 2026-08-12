@@ -1,0 +1,21 @@
+{
+  "target": "failure.example",
+  "observations": [
+    {
+      "id": "recursive-servfail",
+      "vantage": "cn-north",
+      "resolver": "public-a",
+      "transport": "udp",
+      "status": "SERVFAIL",
+      "answers": []
+    },
+    {
+      "id": "recursive-refused",
+      "vantage": "cn-north",
+      "resolver": "restricted",
+      "transport": "udp",
+      "status": "REFUSED",
+      "answers": []
+    }
+  ]
+}

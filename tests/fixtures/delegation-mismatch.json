@@ -1,0 +1,23 @@
+{
+  "target": "delegation.example",
+  "observations": [
+    {
+      "id": "parent-delegation",
+      "vantage": "control",
+      "resolver": "parent-zone",
+      "transport": "udp",
+      "role": "parent_delegation",
+      "status": "NOERROR",
+      "nameservers": ["ns1.old.example.", "ns2.old.example."]
+    },
+    {
+      "id": "child-authority",
+      "vantage": "control",
+      "resolver": "child-zone",
+      "transport": "udp",
+      "role": "child_authority",
+      "status": "NOERROR",
+      "nameservers": ["ns1.new.example.", "ns2.new.example."]
+    }
+  ]
+}

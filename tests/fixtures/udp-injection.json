@@ -1,0 +1,35 @@
+{
+  "target": "www.example",
+  "observations": [
+    {
+      "id": "affected-udp",
+      "vantage": "affected",
+      "resolver": "isp",
+      "transport": "udp",
+      "role": "recursive",
+      "record_type": "A",
+      "status": "NOERROR",
+      "answers": ["203.0.113.10"]
+    },
+    {
+      "id": "affected-tcp",
+      "vantage": "affected",
+      "resolver": "isp",
+      "transport": "tcp",
+      "role": "recursive",
+      "record_type": "A",
+      "status": "NOERROR",
+      "answers": ["198.51.100.20"]
+    },
+    {
+      "id": "control-udp",
+      "vantage": "control",
+      "resolver": "public",
+      "transport": "udp",
+      "role": "recursive",
+      "record_type": "A",
+      "status": "NOERROR",
+      "answers": ["198.51.100.20"]
+    }
+  ]
+}

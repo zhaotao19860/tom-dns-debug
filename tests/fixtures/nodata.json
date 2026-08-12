@@ -1,0 +1,15 @@
+{
+  "target": "ipv4-only.example",
+  "observations": [
+    {
+      "id": "recursive-nodata",
+      "vantage": "cn-north",
+      "resolver": "public",
+      "transport": "udp",
+      "record_type": "AAAA",
+      "status": "NOERROR",
+      "answers": [],
+      "authority": ["example. 300 IN SOA ns1.example. hostmaster.example. 1 3600 600 86400 60"]
+    }
+  ]
+}

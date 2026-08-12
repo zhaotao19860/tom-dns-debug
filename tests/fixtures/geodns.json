@@ -1,0 +1,49 @@
+{
+  "target": "cdn.example",
+  "observations": [
+    {
+      "id": "north-recursive",
+      "vantage": "north",
+      "resolver": "public",
+      "transport": "udp",
+      "role": "recursive",
+      "record_type": "A",
+      "status": "NOERROR",
+      "answers": ["192.0.2.10"],
+      "observed_at": "2026-08-11T12:00:00Z"
+    },
+    {
+      "id": "north-recursive-repeat",
+      "vantage": "north",
+      "resolver": "public",
+      "transport": "udp",
+      "role": "recursive",
+      "record_type": "A",
+      "status": "NOERROR",
+      "answers": ["192.0.2.10"],
+      "observed_at": "2026-08-11T12:01:00Z"
+    },
+    {
+      "id": "south-recursive",
+      "vantage": "south",
+      "resolver": "public",
+      "transport": "udp",
+      "role": "recursive",
+      "record_type": "A",
+      "status": "NOERROR",
+      "answers": ["198.51.100.10"],
+      "observed_at": "2026-08-11T12:02:00Z"
+    },
+    {
+      "id": "south-recursive-repeat",
+      "vantage": "south",
+      "resolver": "public",
+      "transport": "udp",
+      "role": "recursive",
+      "record_type": "A",
+      "status": "NOERROR",
+      "answers": ["198.51.100.10"],
+      "observed_at": "2026-08-11T12:03:00Z"
+    }
+  ]
+}

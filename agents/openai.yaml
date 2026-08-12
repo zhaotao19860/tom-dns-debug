@@ -1,0 +1,4 @@
+interface:
+  display_name: "DNS Debug"
+  short_description: "Read-only DNS checks across resolver, DNSSEC, public DNS, delegation, and authoritative layers"
+  default_prompt: "Use $tom-dns-debug to check DNS health or diagnose failures, hijacking, poisoning, DNSSEC problems, and regional anomalies with bounded local evidence."
