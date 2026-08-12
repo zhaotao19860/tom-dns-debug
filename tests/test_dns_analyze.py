@@ -1129,5 +1129,146 @@ class TopologyDiagramTests(unittest.TestCase):
         self.assertEqual(block, ["├─ first", "│  child", "└─ second"])
 
 
+SOA_CURRENT = "ns1.example.com. hostmaster.example.com. 2015168001 30 30 2592000 600"
+SOA_OLDER = "ns1.example.com. hostmaster.example.com. 2015163101 30 30 2592000 600"
+SOA_OTHER_ZONE = "ns1.elsewhere.net. hostmaster.elsewhere.net. 2015168001 30 30 2592000 600"
+
+
+def soa_observation(identifier, rdata, **overrides):
+    return observation(
+        identifier, qname="example.com", qtype="SOA", answers=[rdata], **overrides
+    )
+
+
+class StaleCachedAnswerTests(unittest.TestCase):
+    """An unexpired cache is not a resolver contradicting the zone it copied from."""
+
+    def _findings(self, observations):
+        return dns_analyze.classify_evidence(
+            {"target": "example.com", "observations": observations}
+        )
+
+    def _categories(self, findings):
+        return {item["category"] for item in findings}
+
+    def _stale(self):
+        return [
+            soa_observation("public-stale", SOA_OLDER, layer="public",
+                            resolver="180.76.76.76"),
+            soa_observation("local-current", SOA_CURRENT),
+            soa_observation("auth-1", SOA_CURRENT, role="authoritative",
+                            layer="authoritative", resolver="192.0.2.10"),
+            soa_observation("auth-2", SOA_CURRENT, role="authoritative",
+                            layer="authoritative", resolver="192.0.2.11"),
+        ]
+
+    def test_an_older_serial_for_the_same_zone_is_a_stale_cache_not_a_divergence(self):
+        categories = self._categories(self._findings(self._stale()))
+
+        self.assertIn("stale_cached_answer", categories)
+        self.assertNotIn("resolver_authoritative_divergence", categories)
+
+    def test_the_stale_finding_is_minor_and_names_the_resolver_holding_it(self):
+        stale = next(
+            item for item in self._findings(self._stale())
+            if item["category"] == "stale_cached_answer"
+        )
+
+        self.assertEqual(stale["severity"], "low")
+        self.assertEqual(stale["status"], "confirmed")
+        self.assertIn("180.76.76.76", stale["summary"])
+        self.assertIn("序列号", stale["summary"])
+
+    def test_the_resolvers_that_matched_still_count_as_agreement(self):
+        categories = self._categories(self._findings(self._stale()))
+
+        self.assertIn("authoritative_agreement", categories)
+
+    def test_a_stale_cache_does_not_headline_the_report(self):
+        evidence = {"target": "example.com", "observations": self._stale()}
+        report = dns_analyze.render_report(
+            evidence, dns_analyze.classify_evidence(evidence), language="zh-CN"
+        )
+        conclusion = report.split("## 结论", 1)[1].split("\n## ", 1)[0]
+
+        self.assertIn("✅", conclusion)
+        self.assertNotIn("⚠️", conclusion)
+        self.assertIn("次要发现", conclusion)
+
+    def test_a_different_zone_with_a_newer_serial_is_still_a_divergence(self):
+        """Same serial rules do not apply once the zone identity itself differs."""
+        observations = [
+            soa_observation("public-other", SOA_OTHER_ZONE, layer="public",
+                            resolver="180.76.76.76"),
+            soa_observation("auth-1", SOA_CURRENT, role="authoritative",
+                            layer="authoritative", resolver="192.0.2.10"),
+        ]
+        categories = self._categories(self._findings(observations))
+
+        self.assertIn("resolver_authoritative_divergence", categories)
+        self.assertNotIn("stale_cached_answer", categories)
+
+    def test_a_newer_serial_at_the_resolver_is_not_treated_as_stale(self):
+        """Only a cache running behind the zone is ordinary; running ahead is not."""
+        observations = [
+            soa_observation("public-ahead", SOA_CURRENT, layer="public",
+                            resolver="180.76.76.76"),
+            soa_observation("auth-1", SOA_OLDER, role="authoritative",
+                            layer="authoritative", resolver="192.0.2.10"),
+        ]
+        categories = self._categories(self._findings(observations))
+
+        self.assertIn("resolver_authoritative_divergence", categories)
+        self.assertNotIn("stale_cached_answer", categories)
+
+    def test_a_soa_difference_is_not_described_as_an_address_difference(self):
+        evidence = {"target": "example.com", "observations": self._stale() + [
+            soa_observation("public-current", SOA_CURRENT, layer="public",
+                            resolver="8.8.8.8"),
+        ]}
+        report = dns_analyze.render_report(
+            evidence, dns_analyze.classify_evidence(evidence), language="zh-CN"
+        )
+        table = report.split("## 检查项一览", 1)[1].split("\n## ", 1)[0]
+
+        self.assertIn("SOA 记录不完全相同", table)
+        self.assertNotIn("给出的地址不完全相同", table)
+
+    def test_rdata_that_is_not_a_seven_field_soa_is_never_guessed_at(self):
+        self.assertIsNone(dns_analyze._soa_zone_serial(
+            {"_answers": (("example.com.", "SOA", "ns1.example.com. 2015168001"),)}
+        ))
+        self.assertIsNone(dns_analyze._soa_zone_serial(
+            {"_answers": (("example.com.", "A", "192.0.2.80"),)}
+        ))
+
+
+class ComparisonBlameTests(unittest.TestCase):
+    """A comparison marks the side it accuses, never the yardstick it used."""
+
+    def _diagram(self, observations):
+        evidence = {"target": "example.com", "observations": observations}
+        report = dns_analyze.render_report(
+            evidence, dns_analyze.classify_evidence(evidence), language="zh-CN"
+        )
+        return report.split("## 解析链路图", 1)[1].split("\n## ", 1)[0]
+
+    def test_a_diverging_resolver_is_marked_and_the_authority_is_not(self):
+        diagram = self._diagram([
+            observation("public-odd", layer="public", resolver="180.76.76.76",
+                        answers=["203.0.113.9"]),
+            observation("auth-1", role="authoritative", layer="authoritative",
+                        resolver="192.0.2.10"),
+            observation("auth-2", role="authoritative", layer="authoritative",
+                        resolver="192.0.2.11"),
+        ])
+        nodes = diagram.split("```")[1]
+
+        self.assertIn("180.76.76.76 ⚠️", nodes)
+        self.assertIn("192.0.2.10 ✅", nodes)
+        self.assertIn("192.0.2.11 ✅", nodes)
+        self.assertNotIn("192.0.2.10：", diagram)
+
+
 if __name__ == "__main__":
     unittest.main()

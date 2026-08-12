@@ -73,6 +73,8 @@ Every finding keeps `category`, `severity`, `confidence`, `status`, `summary`, `
 
 `resolution_succeeded` is scoped, not global: matching non-empty `NOERROR` samples over UDP/TCP or independent repeats can confirm only that qname/qtype/resolver/vantage combination. NODATA is not NXDOMAIN. A successful recursive response does not prove authoritative, DNSSEC, regional, HTTP, or application health.
 
+A recursive answer that differs from the authority only by carrying a lower SOA serial for the same MNAME and RNAME is `stale_cached_answer`: low severity, confirmed, an unexpired cache rather than a contradiction. `resolver_authoritative_divergence` is reserved for a real disagreement, and the wording of a divergence must name the record type that actually differed — an SOA serial is not an address.
+
 Run regional comparison only when a region label, remote vantage, or explicit regional analysis request exists. A claim needs two vantage labels, repeated unique probe IDs, identical qname/qtype/resolver class/transport/role, and a close time window. GeoDNS/CDN consistency, resolver-versus-authoritative divergence, and UDP-versus-TCP divergence are clues, not proof of hijacking. Anycast and resolver egress locations are approximate.
 
 A DNSSEC verdict maps to exactly one category:
@@ -119,6 +121,6 @@ Each node carries the same five icons, and they describe that node alone:
 | ❓ | it reached no verdict, such as a walk from the root that ended without an answer |
 | ⚪ | not checked this run |
 
-A comparison spanning several resolvers is a fact about the set, never a mark on any one of them: differing addresses are stated in a sentence under the diagram instead. Flagged nodes are repeated under `要看的节点` with what each returned, ❓ nodes are listed separately so they are not read as healthy, and an all-✅ chain says so in one line.
+A comparison spanning several resolvers is a fact about the set, never a mark on any one of them: differing addresses are stated in a sentence under the diagram instead. A comparison that does accuse one side — a resolver against its zone — marks only that side, never the authority used as the yardstick. Flagged nodes are repeated under `要看的节点` with what each returned, ❓ nodes are listed separately so they are not read as healthy, and an all-✅ chain says so in one line.
 
 Finalize with `--finalize-bundle`, then manually review every artifact for internal names, addresses, topology, free-form output, and secrets. Sharing can expose those details. The skill never uploads or sends automatically, and the one remote step sends only the queried name and record type.

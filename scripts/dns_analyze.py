@@ -938,16 +938,74 @@ def _public_resolver_findings(observations: List[dict]) -> List[dict]:
                 supporting, [], [],
             ))
         else:
+            # An SOA or NS difference is not an address difference; naming the wrong thing
+            # sends the reader looking for a hijacked address that no probe reported.
+            if (identity[1] or "").upper() in {"A", "AAAA"}:
+                subject, because = "地址", "使用 CDN 或按地区解析的域名本来就会这样"
+            else:
+                subject, because = "答案", "各家缓存的版本新旧不同也会这样"
             findings.append(_finding(
                 "public_resolver_divergence", "low", "low", "unverified",
-                "{0} 的 {1} 查询在不同解析器上返回的地址不完全相同（{2}）；"
-                "使用 CDN 或按地区解析的域名本来就会这样，不能据此判定被篡改。".format(
-                    identity[0], identity[1], resolvers,
+                "{0} 的 {1} 查询在不同解析器上返回的{2}不完全相同（{3}）；"
+                "{4}，不能据此判定被篡改。".format(
+                    identity[0], identity[1], subject, resolvers, because,
                 ),
                 supporting, [],
                 _divergence_next_checks(identity[0], authoritative),
             ))
     return findings
+
+
+def _soa_zone_serial(item: dict) -> Optional[Tuple[Tuple[str, str], int]]:
+    """The zone identity and serial of a lone SOA answer, as ``((mname, rname), serial)``.
+
+    Anything else — several records, or rdata dig did not lay out as the seven standard
+    fields — returns ``None`` rather than a guess.
+    """
+    answers = item.get("_answers") or ()
+    if len(answers) != 1:
+        return None
+    entry = answers[0]
+    if len(entry) >= 3:
+        if entry[1] != "SOA":
+            return None
+        rdata = entry[2]
+    elif len(entry) == 1 and (item.get("_qtype") or "").upper() == "SOA":
+        # A manual observation may carry the rdata alone, with the type only on the query.
+        rdata = entry[0]
+    else:
+        return None
+    fields = _safe_text(rdata).split()
+    if len(fields) != 7:
+        return None
+    try:
+        serial = int(fields[2])
+    except ValueError:
+        return None
+    return (fields[0].lower(), fields[1].lower()), serial
+
+
+def _is_stale_soa_copy(recursive_item: dict, authoritative_items: List[dict]) -> bool:
+    """Same zone, lower serial: a cached copy of an older version, not a contradiction.
+
+    The serial only ever moves forward, so a resolver holding a smaller one is holding
+    an entry whose TTL has not run out yet. Calling that a divergence would make cache
+    behaviour every large zone shows look like tampering.
+    """
+    cached = _soa_zone_serial(recursive_item)
+    if cached is None:
+        return False
+    zone, serial = cached
+    references = [
+        entry for entry in (_soa_zone_serial(item) for item in authoritative_items)
+        if entry is not None
+    ]
+    if not references:
+        return False
+    return all(
+        other_zone == zone and other_serial > serial
+        for other_zone, other_serial in references
+    )
 
 
 def classify_evidence(evidence: dict) -> List[dict]:
@@ -1180,7 +1238,7 @@ def classify_evidence(evidence: dict) -> List[dict]:
     for cohort in recursive_authoritative.values():
         if not cohort["recursive"] or not cohort["authoritative"]:
             continue
-        divergent_recursive = [
+        unmatched = [
             rec for rec in cohort["recursive"]
             if not any(auth["_answers"] == rec["_answers"] for auth in cohort["authoritative"])
         ]
@@ -1188,14 +1246,35 @@ def classify_evidence(evidence: dict) -> List[dict]:
             rec for rec in cohort["recursive"]
             if any(auth["_answers"] == rec["_answers"] for auth in cohort["authoritative"])
         ]
-        if not divergent_recursive:
+        # Separate an unexpired cache from a real disagreement before judging severity:
+        # an older serial for the same zone is how caching looks, and reporting it as
+        # divergence turns the whole report's headline into a suspicion of tampering.
+        stale = [rec for rec in unmatched if _is_stale_soa_copy(rec, cohort["authoritative"])]
+        stale_ids = {id(rec) for rec in stale}
+        divergent_recursive = [rec for rec in unmatched if id(rec) not in stale_ids]
+        if stale:
+            resolvers = "、".join(sorted({
+                _resolver_text(rec["resolver"]) for rec in stale if rec["resolver"]
+            }))
             findings.append(_finding(
-                "authoritative_agreement", "info", "high", "confirmed",
-                "直接询问 {0} 台权威服务器，答案与这台机器解析到的完全相同。".format(
-                    len(cohort["authoritative"]),
-                ),
-                cohort["authoritative"] + matching_recursive, [], [],
+                "stale_cached_answer", "low", "high", "confirmed",
+                "{0} 缓存的区域信息还是旧版本——它给出的序列号比权威服务器的低，"
+                "说明这条缓存还没到期；内容仍来自这个域名的所有者，不是被换掉的答案，"
+                "缓存过期后会自动跟上。".format(resolvers or "某台解析器"),
+                stale + cohort["authoritative"], [],
+                ["等这条记录的缓存时间（TTL）到期后再问同一台解析器，核对序列号是否追平。"],
             ))
+        if not divergent_recursive:
+            # With every recursive copy stale there is no resolver left whose answer
+            # matched, so there is nothing to call agreement; the stale finding stands alone.
+            if matching_recursive:
+                findings.append(_finding(
+                    "authoritative_agreement", "info", "high", "confirmed",
+                    "直接询问 {0} 台权威服务器，答案与这台机器解析到的完全相同。".format(
+                        len(cohort["authoritative"]),
+                    ),
+                    cohort["authoritative"] + matching_recursive, [], [],
+                ))
             continue
         findings.append(_finding(
             "resolver_authoritative_divergence", "high", "medium", "high_probability",
@@ -1461,6 +1540,7 @@ _CATEGORY_LAYERS = {
     "dnssec_valid": "dnssec", "dnssec_indeterminate": "dnssec",
     "delegation_inconsistency": "trace",
     "resolver_authoritative_divergence": "authoritative",
+    "stale_cached_answer": "authoritative",
     "authoritative_server_refused": "authoritative",
     "authoritative_agreement": "authoritative",
     "public_resolver_agreement": "public", "public_resolver_divergence": "public",
@@ -1498,6 +1578,7 @@ _SEVERITY_ORDER = (
     "probe_execution_error",
     "name_not_found",
     "missing_record",
+    "stale_cached_answer",
 )
 
 
@@ -1609,7 +1690,23 @@ def _layer_note(layer: str, observations: List[dict], row_findings: List[dict]) 
             return ""
         categories = {item.get("category") for item in row_findings}
         if "public_resolver_divergence" in categories:
-            outcome = "给出的地址不完全相同，常见于 CDN 或按地区解析，单凭这一点判断不了异常"
+            # Which record type actually differed decides the wording: calling an SOA
+            # serial difference "地址不完全相同" describes something that did not happen.
+            by_type: Dict[str, set] = {}
+            for item in observations:
+                if not item["_qtype"] or item["_answers"] is None:
+                    continue
+                by_type.setdefault(item["_qtype"], set()).add(item["_answers"])
+            differing = sorted(
+                qtype for qtype, values in by_type.items() if len(values) > 1
+            )
+            if not differing or {"A", "AAAA"} & set(differing):
+                outcome = "给出的地址不完全相同，常见于 CDN 或按地区解析，单凭这一点判断不了异常"
+            else:
+                outcome = (
+                    "给出的 {0} 记录不完全相同，多为各家缓存的版本新旧不同，"
+                    "单凭这一点判断不了异常".format("、".join(differing))
+                )
         elif "public_resolver_agreement" in categories:
             outcome = "返回同一批地址"
         else:
@@ -1814,6 +1911,26 @@ def _node_findings(node_observations: List[dict], findings: List[dict]) -> List[
     ]
 
 
+# A comparison cites both sides, but only one of them is the suspect: the other is the
+# yardstick it was measured against. Without this, a resolver disagreeing with the zone
+# would put a mark on the authoritative servers that reported the zone correctly.
+_FINDING_ACCUSED_ROLES = {
+    "resolver_authoritative_divergence": frozenset({"recursive", "local"}),
+    "stale_cached_answer": frozenset({"recursive", "local"}),
+}
+
+
+def _finding_accuses(finding: dict, node_observations: List[dict]) -> bool:
+    """Whether this finding says something about this hop, rather than merely citing it."""
+    roles = _FINDING_ACCUSED_ROLES.get(finding.get("category"))
+    if roles is None:
+        return True
+    cited = set(finding.get("supporting_probe_ids") or ())
+    return any(
+        item["role"] in roles for item in node_observations if item["id"] in cited
+    )
+
+
 def _node_icon(node_observations: List[dict], findings: List[dict]) -> str:
     """Worst thing the evidence says about one hop, as a single glyph.
 
@@ -1836,6 +1953,7 @@ def _node_icon(node_observations: List[dict], findings: List[dict]) -> str:
         item for item in _node_findings(node_observations, findings)
         if item.get("category") not in _NON_CAUSE_CATEGORIES
         and item.get("severity") != "low"
+        and _finding_accuses(item, node_observations)
     ]
     if any(item.get("status") == "confirmed" for item in deciding):
         return "❌"
@@ -2192,7 +2310,12 @@ def _cause_section(findings: List[dict]) -> List[str]:
     return lines
 
 
-def _conclusion(findings: List[dict], target_text: str, pending_rows: int = 0) -> str:
+def _conclusion(
+    findings: List[dict],
+    target_text: str,
+    pending_rows: int = 0,
+    has_address: bool = True,
+) -> str:
     """One sentence a non-specialist can act on, never stronger than the evidence."""
     causes = [
         item for item in findings if item.get("category") not in _NON_CAUSE_CATEGORIES
@@ -2218,9 +2341,15 @@ def _conclusion(findings: List[dict], target_text: str, pending_rows: int = 0) -
     if probable:
         return "⚠️ 很可能有问题：{0}".format(_safe_text(probable[0].get("summary", "")))
     if resolved:
+        # Saying "查到了地址" about a name that answered NOERROR with no address at all
+        # contradicts the very table underneath it.
+        opening = (
+            "这台机器能正常查到 {0} 的地址".format(target_text) if has_address
+            else "{0} 的查询都能正常应答（这个名字本身没有登记地址记录）".format(target_text)
+        )
         text = (
-            "✅ 一切正常。这台机器能正常查到 {0} 的地址，"
-            "本次做过的各项检查没有发现被篡改或被拦截的迹象。".format(target_text)
+            "✅ 一切正常。{0}，"
+            "本次做过的各项检查没有发现被篡改或被拦截的迹象。".format(opening)
         )
         pending = [
             item for item in findings
@@ -2529,7 +2658,12 @@ def render_report(evidence: dict, findings: List[dict], language: str = "zh-CN")
         "",
         # The headline counts the rows a reader can actually see, not every internal
         # finding: promising two "❓" lines and printing one reads as a bug.
-        _conclusion(findings, target_text, sum(1 for row in rows if row[0] == "❓")),
+        _conclusion(
+            findings,
+            target_text,
+            sum(1 for row in rows if row[0] == "❓"),
+            any(_addresses_by_family(observations)),
+        ),
         "",
         "## 检查项一览",
         "",
