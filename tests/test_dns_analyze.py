@@ -955,19 +955,19 @@ class PrivateAnswerTests(unittest.TestCase):
     def test_a_public_resolver_answering_with_an_rfc1918_address_is_flagged(self):
         finding = self._findings([
             observation("public-bad", layer="public", resolver="8.8.8.8",
-                        answers=["10.6.145.191"]),
+                        answers=["10.0.0.9"]),
         ])["private_address_answer"]
 
         self.assertEqual(finding["severity"], "low")
         self.assertEqual(finding["status"], "high_probability")
-        self.assertIn("10.6.145.191", finding["summary"])
+        self.assertIn("10.0.0.9", finding["summary"])
         self.assertIn("8.8.8.8", finding["summary"])
         self.assertEqual(finding["supporting_probe_ids"], ["public-bad"])
 
     def test_the_machines_own_resolver_answering_that_way_is_not_flagged(self):
         """Split-horizon DNS on the local network is the normal case, not a fault."""
         categories = self._findings([
-            observation("local", answers=["10.6.145.191"]),
+            observation("local", answers=["10.0.0.9"]),
         ])
 
         self.assertNotIn("private_address_answer", categories)
@@ -983,7 +983,7 @@ class PrivateAnswerTests(unittest.TestCase):
     def test_an_internal_target_expects_an_internal_answer(self):
         categories = self._findings([
             observation("public-a", qname="printer.local", layer="public",
-                        resolver="8.8.8.8", answers=["10.6.145.191"]),
+                        resolver="8.8.8.8", answers=["10.0.0.9"]),
         ], target="printer.local")
 
         self.assertNotIn("private_address_answer", categories)
@@ -1060,12 +1060,12 @@ class TopologyDiagramTests(unittest.TestCase):
         diagram = self._diagram(self._report([
             observation("local-udp"),
             observation("public-bad", layer="public", resolver="198.51.100.9",
-                        answers=["10.6.145.191"]),
+                        answers=["10.0.0.9"]),
         ]))
 
         self.assertIn("198.51.100.9 ⚠️", diagram)
         self.assertIn("**要看的节点**", diagram)
-        self.assertIn("- 198.51.100.9：10.6.145.191（内网地址，公网到不了）", diagram)
+        self.assertIn("- 198.51.100.9：10.0.0.9（内网地址，公网到不了）", diagram)
         self.assertNotIn("- 本机默认解析器", diagram)
 
     def test_a_resolver_that_never_answered_is_marked_broken(self):
